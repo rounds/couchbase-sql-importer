@@ -14,6 +14,7 @@ import java.util.logging.ConsoleHandler;
 import java.util.logging.Handler;
 import java.util.logging.Level;
 import java.util.logging.Logger;
+///import java.text.SimpleDateFormat;
 
 public class SqlImporter {
 
@@ -25,6 +26,7 @@ public class SqlImporter {
     private static final String SQL_CONN_STRING = "sql.connection";
     private static final String SQL_USER = "sql.username";
     private static final String SQL_PASSWORD = "sql.password";
+    private static final String MAX_LINES_TO_CONVERT = "sql.maxlines";
 
     private static final String TABLES_LIST = "import.tables";
     private static final String CREATE_VIEWS = "import.createViews";
@@ -38,6 +40,7 @@ public class SqlImporter {
     private String sqlConnString = null;
     private String sqlUser = null;
     private String sqlPassword = null;
+    private int max_lines_to_convert = Integer.MAX_VALUE;
 
     // Couchbase information
     private List uris = new ArrayList();
@@ -140,6 +143,10 @@ public class SqlImporter {
                 throw new Exception(" JDBC Password not specified");
             }
 
+            if (prop.containsKey(MAX_LINES_TO_CONVERT)) {
+                max_lines_to_convert = Integer.parseInt(prop.getProperty(MAX_LINES_TO_CONVERT));
+            }
+
             if (prop.containsKey(TABLES_LIST)) {
                 tableList = prop.getProperty(TABLES_LIST).split(",");
             }
@@ -160,6 +167,7 @@ public class SqlImporter {
             System.out.println("\nImporting table(s)");
             System.out.println("\tfrom : \t" + sqlConnString);
             System.out.println("\tto : \t" + uris + " - " + bucket);
+            System.out.println("max lines to convert:" + max_lines_to_convert);
 
 
         } catch (Exception e) {
@@ -217,7 +225,11 @@ public class SqlImporter {
         }
         PreparedStatement preparedStatement = null;
         String selectSQL = "SELECT * FROM " + tableName;
-        Gson gson = new Gson();
+        String selectSQL_with_limit = "SELECT * FROM " + tableName + " LIMIT " + max_lines_to_convert;
+        if (max_lines_to_convert < Integer.MAX_VALUE){
+            selectSQL = selectSQL_with_limit;
+        }
+       Gson gson = new Gson();
         try {
 
             preparedStatement = this.getConnection().prepareStatement(selectSQL);
@@ -226,13 +238,46 @@ public class SqlImporter {
             int numColumns = rsmd.getColumnCount();
 
             int numRow = 0;
+            String fb_userid = "";
             while (rs.next()) {
-                Map<String, Object> map = new HashMap<String, Object>();
+                Map<String, Object> topLevel = new HashMap<String, Object>();
+                Map<String, Object> provider_data = new HashMap<String, Object>();
 
+                topLevel.put("provider_data", provider_data);
 
                 for (int i = 1; i < numColumns + 1; i++) {
                     String columnName = this.getNamewithCase(rsmd.getColumnName(i), typeFieldCase);
+                    if (columnName.equals("id")) {
+                        //do nothing
+                        continue;
+                    } else if (columnName.equals("rounds_userid")) {
+                        //bigint
+                        topLevel.put("rounds_id", Long.toString(rs.getLong(columnName)));
+                    } else if (columnName.equals("credential_type")) {
+                        //do nothing
+                        continue;
+                    } else if (columnName.equals("social_userid")) {
+                        //bigint
+                        provider_data.put("id", Long.toString(rs.getLong(columnName)));
+                        fb_userid = Long.toString(rs.getLong(columnName));
+                    } else if (columnName.equals("access_token")) {
+                        //varchar(512)
+                        String access_token = rs.getString(columnName);
+                        provider_data.put("token", rs.getString(columnName));
 
+                    } else if (columnName.equals("expire_date")) {
+                        //datetime
+                        //SimpleDateFormat format = new SimpleDateFormat("yyyy-MM-ddTOHH:mm:ssZ");
+                        //String timestamp = rs.getTimestamp(columnName).toString();
+                        provider_data.put("expiry_date",rs.getTimestamp(columnName));
+                    } else
+                    {
+                        //do nothing
+                        continue;
+                    }
+
+
+/****************
                     if (rsmd.getColumnType(i) == java.sql.Types.ARRAY) {
                         map.put(columnName, rs.getArray(columnName));
                     } else if (rsmd.getColumnType(i) == java.sql.Types.BIGINT) {
@@ -262,15 +307,16 @@ public class SqlImporter {
                     } else {
                         map.put(columnName, rs.getObject(columnName));
                     }
+**************/
                 }
 
-                if (typeField != null && ! typeField.isEmpty()) {
-                    map.put(typeField, typeName);
-                }
+//                if (typeField != null && ! typeField.isEmpty()) {
+//                    map.put(typeField, typeName);
+//                }
 
                 // use the rs number as key with table name
-                this.getCouchbaseClient().set(typeName + ":" + rs.getRow(), gson.toJson(map)).get();
-
+                this.getCouchbaseClient().set("facebook" + ":" + fb_userid, gson.toJson(topLevel)).get();
+                System.out.println("Set item with key:" + fb_userid);
 
                 numRow = rs.getRow();
             }
